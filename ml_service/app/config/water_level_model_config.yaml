@@ -1,0 +1,194 @@
+
+# ml_service/app/config/water_level_model_config.yaml
+model:
+  name: "flood_predictor"
+  type: "sklearn"
+  algorithm: "random_forest"  # Changed from linear_regression for better performance
+  device_types: ["water_level_sensor"]
+  description: "Predicts flood risk percentage using formula-based target generation"
+
+training:
+  features: 
+    - "water_level"
+    - "flow_rate"
+    - "precipitation"
+    - "temperature"
+  
+  # NEW: Formula-based target generation for flood risk calculation
+  target_generation:
+    type: "formula"
+    return_type: "float"
+    expression: |
+      # Advanced flood risk calculation
+      # Normalize inputs to 0-1 scale
+      water_level_norm = min(water_level / 5.0, 1.0)  # Assume 5m is max normal level
+      flow_rate_norm = min(flow_rate / 100.0, 1.0)    # Assume 100 m³/s is max normal flow
+      precip_norm = min(precipitation / 50.0, 1.0)    # Assume 50mm/h is heavy rain
+      
+      # Temperature affects snow melt and evaporation
+      temp_factor = 1.0
+      if temperature > 25:  # Hot weather increases evaporation, reduces risk
+          temp_factor = 0.9
+      elif temperature > 0 and temperature < 5:  # Near freezing, potential ice dams
+          temp_factor = 1.1
+      elif temperature < 0:  # Freezing, snow accumulation
+          temp_factor = 0.8
+      
+      # Base risk calculation with weighted factors
+      base_risk = (
+          water_level_norm * 0.4 +      # Water level is most important
+          flow_rate_norm * 0.3 +        # Flow rate second most important
+          precip_norm * 0.2 +           # Current precipitation
+          (precip_norm * 0.1)           # Precipitation impact on future levels
+      )
+      
+      # Apply temperature factor
+      adjusted_risk = base_risk * temp_factor
+      
+      # Add emergency thresholds
+      if water_level > 4.5:  # Critical water level
+          adjusted_risk = max(adjusted_risk, 0.9)
+      elif water_level > 4.0:  # High water level
+          adjusted_risk = max(adjusted_risk, 0.7)
+      
+      # Convert to percentage and clamp
+      result = min(max(adjusted_risk * 100, 0), 100)
+
+  validation_split: 0.2
+  
+  # Optional: Advanced training parameters for random forest
+  parameters:
+    n_estimators: 150
+    max_depth: 12
+    random_state: 42
+    min_samples_split: 3
+    min_samples_leaf: 1
+    max_features: "sqrt"
+
+inference:
+  output_format: "regression"
+  output_range: [0, 100]
+  
+  # Risk level thresholds
+  risk_thresholds:
+    low: [0, 25]
+    moderate: [25, 50]
+    high: [50, 75]
+    critical: [75, 100]
+  
+  # Optional: Output enrichment
+  output_fields:
+    risk_category: "derived"
+    alert_level: "computed"
+    recommended_actions: "dynamic"
+
+storage:
+  model_path: "models/flood_predictor"
+  version_strategy: "timestamp"
+
+
+# # Alternative: ml_service/app/config/water_level_composite_config.yaml
+# # More sophisticated version using composite target generation
+# model:
+#   name: "flood_predictor_advanced"
+#   type: "sklearn"
+#   algorithm: "random_forest"
+#   device_types: ["water_level_sensor", "rain_sensor", "weather_station"]
+#   description: "Advanced flood prediction using composite target generation"
+
+# training:
+#   features: 
+#     - "water_level"
+#     - "flow_rate"
+#     - "precipitation"
+#     - "temperature"
+#     - "soil_moisture"      # If available
+#     - "upstream_level"     # If available
+  
+#   # Composite target generation combining multiple methods
+#   target_generation:
+#     type: "composite"
+#     combination_method: "weighted_avg"
+#     weights: [0.5, 0.3, 0.2]
+#     generators:
+#       # Primary: Formula-based calculation
+#       - type: "formula"
+#         return_type: "float"
+#         expression: |
+#           # Base hydraulic calculation
+#           water_norm = min(water_level / 5.0, 1.0)
+#           flow_norm = min(flow_rate / 100.0, 1.0)
+#           precip_norm = min(precipitation / 50.0, 1.0)
+          
+#           # Hydraulic risk
+#           hydraulic_risk = (water_norm * 0.6 + flow_norm * 0.4) * 100
+          
+#           # Weather impact
+#           weather_multiplier = 1.0 + (precip_norm * 0.3)
+          
+#           result = min(hydraulic_risk * weather_multiplier, 100)
+      
+#       # Secondary: Rule-based emergency conditions
+#       - type: "rule_based"
+#         default_target: 0
+#         rules:
+#           - condition:
+#               water_level: {gt: 4.5}
+#             target: 95
+#           - condition:
+#               and:
+#                 - water_level: {gt: 4.0}
+#                 - flow_rate: {gt: 80}
+#             target: 85
+#           - condition:
+#               and:
+#                 - water_level: {gt: 3.5}
+#                 - precipitation: {gt: 30}
+#             target: 70
+#           - condition:
+#               water_level: {gt: 3.0}
+#             target: 50
+#           - condition: "default"
+#             target: 0
+      
+#       # Tertiary: Lookup table for historical patterns
+#       - type: "lookup_table"
+#         key_fields: ["water_level"]
+#         interpolation: true
+#         default_target: 25
+#         lookup_table:
+#           "1.0": 5
+#           "2.0": 15
+#           "3.0": 35
+#           "3.5": 55
+#           "4.0": 75
+#           "4.5": 90
+#           "5.0": 100
+
+#   validation_split: 0.2
+
+# inference:
+#   output_format: "regression"
+#   output_range: [0, 100]
+  
+#   # Enhanced risk categories
+#   risk_categories:
+#     minimal: [0, 10]
+#     low: [10, 25]
+#     moderate: [25, 50]
+#     high: [50, 75]
+#     severe: [75, 90]
+#     critical: [90, 100]
+  
+#   # Action recommendations
+#   action_thresholds:
+#     monitor: [0, 25]
+#     prepare: [25, 50]
+#     evacuate_low: [50, 75]
+#     evacuate_all: [75, 100]
+
+# storage:
+#   model_path: "models/flood_predictor_advanced"
+#   version_strategy: "timestamp"
+
+# ---

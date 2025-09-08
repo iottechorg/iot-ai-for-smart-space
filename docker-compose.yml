@@ -1,0 +1,281 @@
+services:
+  # EMQX Message Broker
+  emqx:
+    image: emqx/emqx:5.5
+    container_name: emqx
+    ports:
+      - "11883:1883"
+      - "18883:8883"
+      - "18084:8083"
+      - "18085:8084"
+      - "18086:18083"
+    environment:
+      EMQX_NODE_NAME: emqx@127.0.0.1
+      EMQX_CLUSTER__DISCOVERY_STRATEGY: static
+      EMQX_CLUSTER__STATIC__SEEDS: '[emqx@127.0.0.1]'
+      EMQX_DASHBOARD__DEFAULT_USERNAME: admin
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: smartcity123
+      EMQX_LOG__CONSOLE_HANDLER__LEVEL: info
+    volumes:
+      - emqx_data:/opt/emqx/data
+      - emqx_log:/opt/emqx/log
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  telegraf:
+    image: telegraf:latest
+    container_name: telegraf
+    volumes:
+      - ./config/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    depends_on:
+      emqx:
+        condition: service_healthy
+      # influxdb:
+      #   condition: service_healthy
+    environment:
+      - INFLUX_TOKEN=my-token
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_ORG=smartcity
+      - INFLUX_BUCKET=iot_data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "telegraf", "--test"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+  
+  influxdb:
+    image: influxdb:2.7
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=smartcity123
+      - DOCKER_INFLUXDB_INIT_ORG=smartcity
+      - DOCKER_INFLUXDB_INIT_BUCKET=iot_data
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-token
+    restart: unless-stopped
+
+  # ClickHouse Database
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse
+    ports:
+      - "8124:8123"
+      - "9001:9000"
+    environment:
+      CLICKHOUSE_DB: smartcity
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # MinIO Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9090:9000"      # API port (FIXED: was 9090:9090)
+      - "9091:9001"      # Console port (FIXED: was 9091:9091)
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    command: server /data --console-address ":9001"  # FIXED: console on 9001
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]  # FIXED: port 9000
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Initialize MinIO buckets - ENHANCED VERSION
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000    # Use internal port
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin123
+    entrypoint: |
+      /bin/sh -c "
+      echo 'Waiting for MinIO to be ready...';
+      sleep 10;
+      
+      echo 'Setting up MinIO alias...';
+      mc alias set minio http://minio:9000 minioadmin minioadmin123;
+      
+      echo 'Checking MinIO connection...';
+      mc admin info minio || exit 1;
+      
+      echo 'Creating buckets...';
+      mc mb minio/models --ignore-existing;
+      mc mb minio/data --ignore-existing;
+      
+      echo 'Setting bucket policies (optional)...';
+      mc policy set public minio/models || echo 'Policy setting failed, continuing...';
+      
+      echo 'Listing buckets to verify...';
+      mc ls minio;
+      
+      echo 'MinIO initialization completed successfully!';
+      "
+    restart: "no"  # Run once and exit
+
+  # Data Service (REPLACES TELEGRAF)
+  data-service:
+    build: 
+      context: ./data_service
+      dockerfile: Dockerfile
+    container_name: data-service
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DB=smartcity
+      - MQTT_BROKER=emqx
+      - MQTT_PORT=1883
+      - MQTT_USERNAME=
+      - MQTT_PASSWORD=
+      - BATCH_SIZE=100
+      - BATCH_TIMEOUT=5
+      - STARTUP_WAIT_SECONDS=20
+    depends_on:
+      emqx:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # IoT Gateway
+  gateway:
+    build: ./gateway
+    container_name: iot-gateway
+    environment:
+      - MQTT_BROKER=emqx
+      - MQTT_PORT=1883
+      - LOG_LEVEL=INFO
+    depends_on:
+      emqx:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ML Service
+  ml-service:
+    build: 
+      context: ./ml_service
+      dockerfile: Dockerfile
+    container_name: ml-service
+    ports:
+      - "8001:8000"
+    environment:
+      #Clickhouse config
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DB=smartcity
+      # MQTT Config
+      - MQTT_BROKER=emqx
+      - MQTT_PORT=1883
+      - MQTT_USERNAME=
+      - MQTT_PASSWORD=
+      # API Config
+      - API_PORT=8000
+      # MinIO Config
+      - STORAGE_TYPE=minio
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin123
+      # Model Config
+      - MODEL_CONFIG_PATH=/app/config
+      # Training Config
+      - STARTUP_WAIT_SECONDS=30
+      - TRAINING_INTERVAL_HOURS=1          # Train every 1 hour (was 24)
+      - ENABLE_BACKGROUND_TRAINING=true    # Enable/disable background training
+
+        # Cache Management
+      - MAX_CACHED_MODELS=3              # Keep latest 3 models in memory
+      - CACHE_CLEANUP_ENABLED=true       # Enable automatic cleanup
+      - AUTO_CLEANUP_AFTER_TRAINING=true # Clean cache after training
+    volumes:
+      - ./ml_service/app/config:/app/config:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+      # minio-init:
+      #   condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Dashboard
+  dashboard:
+    build: 
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DB=smartcity
+      - ML_SERVICE_URL=http://ml-service:8000
+    # depends_on:
+    #   clickhouse:
+    #     condition: service_healthy
+    #   ml-service:
+    #     condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  emqx_data:
+  emqx_log:
+  clickhouse_data:
+  minio_data:
+  influxdb_data:
+
+networks:
+  default:
+    driver: bridge

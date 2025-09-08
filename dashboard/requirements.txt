@@ -1,0 +1,9 @@
+# dashboard/requirements.txt
+streamlit==1.40.0
+pandas==2.0.3
+numpy==1.24.3
+plotly==5.15.0
+influxdb-client==1.36.1
+python-dotenv==1.0.0
+pyyaml==6.0.1
+clickhouse_connect==0.6.23
